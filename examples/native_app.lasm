@@ -1,8 +1,8 @@
 --!low
-import "../libraries/std/host"
-import "../libraries/std/buffer"
-import "../libraries/std/text"
-import "../libraries/std/vector"
+import "std/host"
+import "std/buffer"
+import "std/text"
+import "std/vector"
 
 -- luasm run examples/native_app.lasm -- output.txt
 if argumentCount() < 2 then
