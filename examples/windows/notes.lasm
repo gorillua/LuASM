@@ -1,0 +1,119 @@
+--!low
+import "windows/ui"
+import "windows/layout"
+import "windows/dialogs"
+import "windows/files"
+import "std/buffer"
+import "std/host"
+
+struct Editor
+    window: ui.Window
+    openButton: ui.Control
+    saveButton: ui.Control
+    newButton: ui.Control
+    text: ui.Control
+    status: ui.Control
+    path: buffer.Buffer
+    scratch: buffer.Buffer
+    dirty: boolean
+    ignoreChange: boolean
+end
+function arrange(editor: ptr<Editor>): void
+    local size = ui.clientSize(editor.window)
+    local column = layout.column(layout.inset(ui.rect(0, 0, size.width, size.height), 16), 12)
+    local toolbar = layout.row(layout.take(addressOf(column), 34), 8)
+    ui.move(editor.newButton, layout.take(addressOf(toolbar), 88))
+    ui.move(editor.openButton, layout.take(addressOf(toolbar), 88))
+    ui.move(editor.saveButton, layout.take(addressOf(toolbar), 88))
+    local rest = layout.remaining(addressOf(column))
+    ui.move(editor.text, ui.rect(rest.x, rest.y, rest.width, rest.height - 32))
+    ui.move(editor.status, ui.rect(rest.x, rest.y + rest.height - 20, rest.width, 20))
+end
+function report(editor: ptr<Editor>, message: string): void dialogs.error(editor.window, "LuASM Notes", message) end
+function canDiscard(editor: ptr<Editor>): boolean
+    if not editor.dirty then return true end
+    return dialogs.confirm(editor.window, "Modifiche non salvate", "Vuoi scartare le modifiche?") == dialogs.accepted
+end
+function save(editor: ptr<Editor>): void
+    if editor.path.length == 0 then
+        local result = dialogs.saveFile(editor.window, addressOf(editor.path))
+        if result == dialogs.cancelled then return end
+        if result == dialogs.failed then report(editor, "Impossibile scegliere il file.") return end
+    end
+    if not ui.getText(editor.text, addressOf(editor.scratch)) then report(editor, "Impossibile leggere il testo.") return end
+    if not files.writeAtomic(buffer.view(addressOf(editor.path)), buffer.view(addressOf(editor.scratch))) then
+        report(editor, "Impossibile salvare il file. Le modifiche sono ancora aperte.") return
+    end
+    editor.dirty = false
+    ui.setText(editor.status, "Salvato")
+    ui.setTitle(editor.window, "LuASM Notes")
+end
+function handleEvent(context: ptr<void>, event: ptr<ui.Event>): void
+    local editor = cast<ptr<Editor>>(context)
+    if event.kind == ui.closeRequested then
+        if canDiscard(editor) then ui.close(editor.window) end
+    elseif event.kind == ui.resized then arrange(editor)
+    elseif event.kind == ui.textChanged and ui.isControl(event, editor.text) then
+        if editor.ignoreChange then editor.ignoreChange = false return end
+        editor.dirty = true
+        ui.setText(editor.status, "Modifiche non salvate")
+        ui.setTitle(editor.window, "LuASM Notes *")
+    elseif event.kind == ui.activated then
+        if ui.isControl(event, editor.saveButton) then save(editor)
+        elseif ui.isControl(event, editor.newButton) then
+            if canDiscard(editor) then
+                if ui.setText(editor.text, "") then
+                    buffer.clear(addressOf(editor.path))
+                    editor.ignoreChange = true
+                    editor.dirty = false
+                    ui.setText(editor.status, "Nuovo documento")
+                    ui.setTitle(editor.window, "LuASM Notes")
+                end
+            end
+        elseif ui.isControl(event, editor.openButton) and canDiscard(editor) then
+            -- Choose/read into temporary buffers: an unsuccessful open keeps the
+            -- previous document AND its save path intact.
+            local chosen = zero<buffer.Buffer>()
+            local contents = zero<buffer.Buffer>()
+            buffer.initialize(addressOf(chosen), host.allocator())
+            buffer.initialize(addressOf(contents), host.allocator())
+            local result = dialogs.openFile(editor.window, addressOf(chosen))
+            if result == dialogs.accepted then
+                if files.read(buffer.view(addressOf(chosen)), addressOf(contents)) then
+                    if ui.setText(editor.text, buffer.view(addressOf(contents))) then
+                        buffer.destroy(addressOf(editor.path))
+                        editor.path = chosen
+                        chosen = zero<buffer.Buffer>()
+                        editor.ignoreChange = true
+                        editor.dirty = false
+                        ui.setText(editor.status, "File aperto · UTF-8")
+                        ui.setTitle(editor.window, "LuASM Notes")
+                    else report(editor, "Il file non contiene testo UTF-8 valido.") end
+                else report(editor, "Impossibile aprire il file.") end
+            elseif result == dialogs.failed then report(editor, "Impossibile scegliere il file.") end
+            buffer.destroy(addressOf(contents))
+            buffer.destroy(addressOf(chosen))
+        end
+    end
+end
+
+local app = ui.application()
+assert(app.handle ~= 0)
+local editor = zero<Editor>()
+buffer.initialize(addressOf(editor.path), host.allocator())
+buffer.initialize(addressOf(editor.scratch), host.allocator())
+editor.window = ui.window(app, "LuASM Notes", 820, 560)
+assert(editor.window.handle ~= 0)
+editor.newButton = ui.button(editor.window, 1, "Nuovo", ui.rect(0, 0, 0, 0))
+editor.openButton = ui.button(editor.window, 2, "Apri…", ui.rect(0, 0, 0, 0))
+editor.saveButton = ui.button(editor.window, 3, "Salva", ui.rect(0, 0, 0, 0))
+editor.text = ui.textBox(editor.window, 4, "", ui.rect(0, 0, 0, 0), true)
+editor.status = ui.label(editor.window, 5, "Pronto · UTF-8", ui.rect(0, 0, 0, 0))
+assert(editor.newButton.handle ~= 0 and editor.openButton.handle ~= 0 and editor.saveButton.handle ~= 0 and editor.text.handle ~= 0 and editor.status.handle ~= 0)
+arrange(addressOf(editor))
+assert(ui.show(editor.window))
+ui.focus(editor.text)
+assert(ui.run(app, handleEvent, cast<ptr<void>>(addressOf(editor))))
+assert(ui.destroy(addressOf(app)))
+buffer.destroy(addressOf(editor.path))
+buffer.destroy(addressOf(editor.scratch))

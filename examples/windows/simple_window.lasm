@@ -1,0 +1,19 @@
+--!low
+import "windows/app"
+import "windows/ui"
+import "windows/dialogs"
+
+function onEvent(context: ptr<void>, event: ptr<ui.Event>): void
+    local owner = cast<ptr<app.App>>(context)
+    if event.kind == ui.activated then
+        dialogs.info(owner.window, "LuASM", "Hello from a native application!")
+    end
+end
+
+local windowApp = app.create("LuASM example", 480, 300)
+assert(app.valid(windowApp))
+local button = ui.button(windowApp.window, 1, "Say hello", ui.rect(24, 24, 160, 40))
+assert(button.handle ~= 0)
+assert(app.show(windowApp))
+assert(app.runWith(addressOf(windowApp), onEvent, cast<ptr<void>>(addressOf(windowApp))))
+assert(app.destroy(addressOf(windowApp)))

@@ -1,0 +1,32 @@
+--!low
+
+-- A one-shot desktop inversion. Windows/apps may repaint parts sooner.
+extern "user32.dll" function SetProcessDPIAware(): i32
+extern "user32.dll" function GetDC(window: ptr<void>): ptr<void>
+extern "user32.dll" function ReleaseDC(window: ptr<void>, hdc: ptr<void>): i32
+extern "user32.dll" function GetSystemMetrics(index: i32): i32
+extern "user32.dll" function RedrawWindow(window: ptr<void>, rectangle: ptr<void>, region: ptr<void>, flags: u32): i32
+extern "gdi32.dll" function PatBlt(hdc: ptr<void>, x: i32, y: i32, width: i32, height: i32, operation: u32): i32
+extern "kernel32.dll" function Sleep(milliseconds: u32): void
+
+requireTarget("windows-x86_64")
+SetProcessDPIAware()
+const DSTINVERT: u32 = 0x00550009
+const DURATION_MS: u32 = 2000
+
+-- Virtual desktop bounds include secondary monitors and negative coordinates.
+local x = GetSystemMetrics(76) -- SM_XVIRTUALSCREEN
+local y = GetSystemMetrics(77) -- SM_YVIRTUALSCREEN
+local width = GetSystemMetrics(78) -- SM_CXVIRTUALSCREEN
+local height = GetSystemMetrics(79) -- SM_CYVIRTUALSCREEN
+assert(width > 0 and height > 0)
+local hdc = GetDC(nil)
+assert(address(hdc) ~= 0)
+local inverted = PatBlt(hdc, x, y, width, height, DSTINVERT)
+ReleaseDC(nil, hdc)
+if inverted ~= 0 then Sleep(DURATION_MS) end
+
+-- Request fresh desktop/window contents, including borders and child windows.
+-- RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME
+RedrawWindow(nil, nil, nil, 0x0585)
+assert(inverted ~= 0)

@@ -1,0 +1,195 @@
+--!low
+import "windows/ffi"
+
+-- A complete Windows x64 GDI application. All native imports are declared here.
+-- Run normally for a window, or pass --smoke for a short hidden-window check.
+struct Rect
+    left: i32
+    top: i32
+    right: i32
+    bottom: i32
+end
+struct PaintStruct
+    hdc: ptr<void>
+    erase: i32
+    bounds: Rect
+    restore: i32
+    incremental: i32
+    reserved: array<u8, 32>
+end
+struct WindowClass
+    size: u32
+    style: u32
+    procedure: fn<isize, ptr<void>, u32, usize, isize>
+    classExtra: i32
+    windowExtra: i32
+    instance: ptr<void>
+    icon: ptr<void>
+    cursor: ptr<void>
+    background: ptr<void>
+    menu: ptr<u16>
+    name: ptr<u16>
+    smallIcon: ptr<void>
+end
+struct Message
+    window: ptr<void>
+    kind: u32
+    wparam: usize
+    lparam: isize
+    time: u32
+    x: i32
+    y: i32
+    privateData: u32
+end
+
+extern "kernel32.dll" function GetModuleHandleW(name: ptr<u16>): ptr<void>
+extern "user32.dll" function SetProcessDPIAware(): i32
+extern "user32.dll" function RegisterClassExW(description: ptr<WindowClass>): u16
+extern "user32.dll" function UnregisterClassW(name: ptr<u16>, instance: ptr<void>): i32
+extern "user32.dll" function LoadCursorW(instance: ptr<void>, name: ptr<u16>): ptr<void>
+extern "user32.dll" function CreateWindowExW(extended: u32, className: ptr<u16>, title: ptr<u16>, style: u32, x: i32, y: i32, width: i32, height: i32, parent: ptr<void>, menu: ptr<void>, instance: ptr<void>, parameter: ptr<void>): ptr<void>
+extern "user32.dll" function DefWindowProcW(target: ptr<void>, kind: u32, wparam: usize, lparam: isize): isize
+extern "user32.dll" function ShowWindow(target: ptr<void>, mode: i32): i32
+extern "user32.dll" function UpdateWindow(target: ptr<void>): i32
+extern "user32.dll" function DestroyWindow(target: ptr<void>): i32
+extern "user32.dll" function GetClientRect(target: ptr<void>, bounds: ptr<Rect>): i32
+extern "user32.dll" function InvalidateRect(target: ptr<void>, bounds: ptr<Rect>, erase: i32): i32
+extern "user32.dll" function BeginPaint(target: ptr<void>, painting: ptr<PaintStruct>): ptr<void>
+extern "user32.dll" function EndPaint(target: ptr<void>, painting: ptr<PaintStruct>): i32
+extern "user32.dll" function GetMessageW(output: ptr<Message>, target: ptr<void>, minimum: u32, maximum: u32): i32
+extern "user32.dll" function TranslateMessage(input: ptr<Message>): i32
+extern "user32.dll" function DispatchMessageW(input: ptr<Message>): isize
+extern "user32.dll" function SendMessageW(target: ptr<void>, kind: u32, wparam: usize, lparam: isize): isize
+extern "user32.dll" function PostQuitMessage(code: i32): void
+extern "user32.dll" function GetDC(target: ptr<void>): ptr<void>
+extern "user32.dll" function ReleaseDC(target: ptr<void>, hdc: ptr<void>): i32
+extern "gdi32.dll" function CreateSolidBrush(color: u32): ptr<void>
+extern "gdi32.dll" function SelectObject(hdc: ptr<void>, object: ptr<void>): ptr<void>
+extern "gdi32.dll" function DeleteObject(object: ptr<void>): i32
+extern "gdi32.dll" function PatBlt(hdc: ptr<void>, x: i32, y: i32, width: i32, height: i32, operation: u32): i32
+extern "gdi32.dll" function CreateCompatibleDC(hdc: ptr<void>): ptr<void>
+extern "gdi32.dll" function CreateCompatibleBitmap(hdc: ptr<void>, width: i32, height: i32): ptr<void>
+extern "gdi32.dll" function DeleteDC(hdc: ptr<void>): i32
+extern "gdi32.dll" function GetPixel(hdc: ptr<void>, x: i32, y: i32): u32
+
+global const WM_DESTROY: u32 = 0x0002
+global const WM_SIZE: u32 = 0x0005
+global const WM_PAINT: u32 = 0x000F
+global const WM_ERASEBKGND: u32 = 0x0014
+global const PATCOPY: u32 = 0x00F00021
+global paintCount: u32 = 0
+
+-- COLORREF uses 0x00BBGGRR, rather than the usual RGB hex order.
+-- Restore the original brush before deleting the one we own.
+function fillArea(hdc: ptr<void>, x: i32, y: i32, width: i32, height: i32, color: u32): void
+    if width <= 0 or height <= 0 then return end
+    local brush = CreateSolidBrush(color)
+    assert(address(brush) ~= 0)
+    local previous = SelectObject(hdc, brush)
+    assert(address(previous) ~= 0)
+    assert(PatBlt(hdc, x, y, width, height, PATCOPY) ~= 0)
+    SelectObject(hdc, previous)
+    assert(DeleteObject(brush) ~= 0)
+end
+
+-- Drawing belongs in WM_PAINT so Windows can restore it after a resize/exposure.
+function paintWindow(target: ptr<void>): void
+    local painting = zero<PaintStruct>()
+    local hdc = BeginPaint(target, addressOf(painting))
+    if address(hdc) ~= 0 then
+        local area = zero<Rect>()
+        assert(GetClientRect(target, addressOf(area)) ~= 0)
+        local width = area.right - area.left
+        local height = area.bottom - area.top
+        fillArea(hdc, 0, 0, width, height, 0x00241B15)
+        fillArea(hdc, 24, 24, width - 48, 8, 0x00CAD486)
+        if width > 100 and height > 110 then
+            local column = (width - 80) / 3
+            local cardHeight = height - 110
+            fillArea(hdc, 24, 56, column, cardHeight, 0x00CAD486)
+            fillArea(hdc, 40 + column, 56, column, cardHeight, 0x00F1BE8B)
+            fillArea(hdc, 56 + column * 2, 56, column, cardHeight, 0x009AADEE)
+        end
+        paintCount += 1
+    end
+    EndPaint(target, addressOf(painting))
+end
+
+-- Windows calls this LuASM function through a typed native callback.
+function windowProcedure(target: ptr<void>, kind: u32, wparam: usize, lparam: isize): isize
+    if kind == WM_PAINT then
+        paintWindow(target)
+        return 0
+    elseif kind == WM_SIZE then
+        InvalidateRect(target, zero<ptr<Rect>>(), 0)
+        return 0
+    elseif kind == WM_ERASEBKGND then
+        -- The paint handler covers the background itself.
+        return 1
+    elseif kind == WM_DESTROY then
+        PostQuitMessage(0)
+        return 0
+    end
+    return DefWindowProcW(target, kind, wparam, lparam)
+end
+
+-- Smoke test draws into our own bitmap and verifies the resulting pixel.
+function smokeCheck(target: ptr<void>): void
+    SendMessageW(target, WM_PAINT, 0, 0)
+    assert(paintCount > 0)
+    local display = GetDC(target)
+    assert(address(display) ~= 0)
+    local memory = CreateCompatibleDC(display)
+    assert(address(memory) ~= 0)
+    local bitmap = CreateCompatibleBitmap(display, 64, 64)
+    assert(address(bitmap) ~= 0)
+    local oldBitmap = SelectObject(memory, bitmap)
+    assert(address(oldBitmap) ~= 0)
+    fillArea(memory, 0, 0, 64, 64, 0x00CAD486)
+    assert(GetPixel(memory, 32, 32) == 0x00CAD486)
+    SelectObject(memory, oldBitmap)
+    assert(DeleteObject(bitmap) ~= 0)
+    assert(DeleteDC(memory) ~= 0)
+    assert(ReleaseDC(target, display) ~= 0)
+    assert(DestroyWindow(target) ~= 0)
+    -- Success is exit code zero, including GUI builds without standard output.
+end
+
+requireTarget("windows-x86_64")
+assert(sizeof<WindowClass>() == 80)
+assert(sizeof<PaintStruct>() == 72)
+assert(sizeof<Message>() == 48)
+SetProcessDPIAware()
+local instance = GetModuleHandleW(zero<ptr<u16>>())
+assert(address(instance) ~= 0)
+local className = ffi.wide("LuASM.PatBlt.Example")
+local caption = ffi.wide("LuASM | PatBlt - resize this window")
+assert(className.ok and caption.ok)
+local description = zero<WindowClass>()
+description.size = cast<u32>(sizeof<WindowClass>())
+description.style = 3 -- CS_HREDRAW | CS_VREDRAW
+description.procedure = windowProcedure
+description.instance = instance
+description.name = ffi.data(className)
+description.cursor = LoadCursorW(zero<ptr<void>>(), ptr<u16>(32512)) -- IDC_ARROW
+assert(RegisterClassExW(addressOf(description)) ~= 0)
+-- WS_OVERLAPPEDWINDOW; the window becomes visible only when ShowWindow runs.
+local handle = CreateWindowExW(0, ffi.data(className), ffi.data(caption), 0x00CF0000, 120, 120, 800, 480, zero<ptr<void>>(), zero<ptr<void>>(), instance, zero<ptr<void>>())
+assert(address(handle) ~= 0)
+if argumentCount() > 1 and argument(1) == "--smoke" then
+    smokeCheck(handle)
+else
+    ShowWindow(handle, 5) -- SW_SHOW
+    UpdateWindow(handle)
+    local message = zero<Message>()
+    while true do
+        local status = GetMessageW(addressOf(message), zero<ptr<void>>(), 0, 0)
+        assert(status >= 0)
+        if status == 0 then break end -- WM_QUIT
+        TranslateMessage(addressOf(message))
+        DispatchMessageW(addressOf(message))
+    end
+end
+assert(UnregisterClassW(ffi.data(className), instance) ~= 0)
+ffi.destroy(addressOf(caption))
+ffi.destroy(addressOf(className))

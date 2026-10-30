@@ -1,0 +1,138 @@
+--!low
+import "windows/ui"
+import "windows/modern"
+import "std/buffer"
+import "std/host"
+
+struct Preview
+    window: ui.Window
+    view: modern.View
+    sidebar: modern.Element
+    themeButton: modern.Element
+    overview: modern.Element
+    settings: modern.Element
+    heading: modern.Element
+    name: modern.Element
+    optimize: modern.Element
+    progress: modern.Element
+    apply: modern.Element
+    status: modern.Element
+    dark: boolean
+    scratch: buffer.Buffer
+end
+function handleEvent(context: ptr<void>, event: ptr<ui.Event>): void
+    local state = cast<ptr<Preview>>(context)
+    if event.kind == ui.closeRequested then ui.close(state.window)
+    elseif event.kind == ui.resized then modern.setVisible(state.sidebar, event.width >= 800)
+    elseif event.kind == ui.activated then
+        if modern.isSource(event, state.themeButton) then
+            state.dark = not state.dark
+            if state.dark then modern.setTheme(state.view, modern.darkTheme) else modern.setTheme(state.view, modern.lightTheme) end
+        elseif modern.isSource(event, state.apply) then
+            if modern.getText(state.name, addressOf(state.scratch)) then
+                modern.setText(state.status, "Settings applied for this preview.")
+                modern.setValue(state.progress, 1.0)
+            end
+        elseif modern.isSource(event, state.overview) then modern.setText(state.heading, "Your next native app.")
+        elseif modern.isSource(event, state.settings) then modern.setText(state.heading, "Make it yours.")
+        elseif modern.isSource(event, state.optimize) then
+            if modern.checked(state.optimize) then modern.setText(state.status, "Release optimizations enabled.") else modern.setText(state.status, "Development configuration selected.") end
+        end
+    elseif event.kind == ui.textChanged and modern.isSource(event, state.name) then
+        modern.setText(state.status, "You have unapplied changes.")
+        modern.setValue(state.progress, 0.68)
+    end
+end
+
+local app = ui.application()
+assert(app.handle ~= 0)
+local state = zero<Preview>()
+state.dark = true
+buffer.initialize(addressOf(state.scratch), host.allocator())
+state.window = ui.window(app, "LuASM Studio · Modern UI", 1120, 840)
+assert(state.window.handle ~= 0)
+state.view = modern.create(state.window, modern.darkTheme, 256)
+assert(state.view.handle ~= 0)
+assert(modern.beginUpdate(state.view))
+local root = modern.root(state.view)
+local rootStyle = modern.style()
+rootStyle.padding = 28.0
+rootStyle.gap = 24.0
+assert(modern.setStyle(root, rootStyle))
+
+local header = modern.row(root, modern.sized(-1.0, 40.0))
+local brand = modern.style()
+brand.fontSize = 20.0
+brand.flags = modern.semibold
+modern.text(header, "LuASM Studio", brand)
+state.themeButton = modern.button(header, 1, "Switch theme", modern.sized(144.0, 40.0))
+
+local body = modern.row(root, modern.style())
+local sidebarStyle = modern.cardStyle()
+sidebarStyle.width = 208.0
+sidebarStyle.height = -1.0
+state.sidebar = modern.card(body, sidebarStyle)
+modern.text(state.sidebar, "WORKSPACE", modern.caption())
+local selected = modern.sized(-1.0, 40.0)
+selected.flags = modern.accent | modern.semibold
+state.overview = modern.button(state.sidebar, 2, "Overview", selected)
+state.settings = modern.button(state.sidebar, 3, "Build settings", modern.style())
+local mutedButton = modern.style()
+mutedButton.flags = modern.muted
+local packages = modern.button(state.sidebar, 4, "Packages", mutedButton)
+modern.setEnabled(packages, false)
+local spacerStyle = modern.sized(-1.0, -1.0)
+modern.column(state.sidebar, spacerStyle)
+modern.text(state.sidebar, "COMPONENT PREVIEW", modern.caption())
+modern.text(state.sidebar, "A focused space for your next idea.", modern.caption())
+
+local content = modern.column(body, modern.style())
+local introStyle = modern.style()
+introStyle.gap = 6.0
+local intro = modern.column(content, introStyle)
+state.heading = modern.text(intro, "Your next native app.", modern.heading())
+modern.text(intro, "A familiar workspace, with room for something new.", modern.caption())
+local metrics = modern.row(content, modern.style())
+local metricStyle = modern.cardStyle()
+metricStyle.padding = 16.0
+metricStyle.gap = 8.0
+local projectCard = modern.card(metrics, metricStyle)
+modern.text(projectCard, "CURRENT PROJECT", modern.caption())
+local metricText = modern.style()
+metricText.fontSize = 20.0
+metricText.flags = modern.semibold
+modern.text(projectCard, "Untitled application", metricText)
+modern.text(projectCard, "Windows desktop", modern.caption())
+local healthCard = modern.card(metrics, metricStyle)
+modern.text(healthCard, "WORKSPACE STATUS", modern.caption())
+modern.text(healthCard, "Everything is ready", metricText)
+modern.text(healthCard, "Your ideas start here", modern.caption())
+
+local settingsStyle = modern.cardStyle()
+settingsStyle.gap = 12.0
+local panel = modern.card(content, settingsStyle)
+local panelTitle = modern.style()
+panelTitle.fontSize = 18.0
+panelTitle.flags = modern.semibold
+modern.text(panel, "Project settings", panelTitle)
+modern.text(panel, "Application name", modern.style())
+state.name = modern.textBox(panel, 5, "Untitled application", modern.style())
+modern.toggle(panel, 6, "Remember workspace layout", true, modern.style())
+state.optimize = modern.toggle(panel, 7, "Optimize release build", true, modern.style())
+modern.divider(panel)
+state.progress = modern.progress(panel, 0.68, modern.style())
+local footer = modern.row(panel, modern.style())
+state.status = modern.text(footer, "Ready when you are.", modern.caption())
+local applyStyle = modern.sized(152.0, 40.0)
+applyStyle.flags = modern.accent | modern.semibold
+state.apply = modern.button(footer, 8, "Apply settings", applyStyle)
+assert(state.apply.handle ~= 0 and state.name.handle ~= 0)
+assert(modern.endUpdate(state.view))
+if argumentCount() == 3 and argument(1) == "--snapshot" then
+    assert(modern.snapshot(state.view, argument(2)))
+else
+    assert(ui.show(state.window))
+    assert(ui.run(app, handleEvent, cast<ptr<void>>(addressOf(state))))
+end
+assert(ui.destroy(addressOf(app)))
+buffer.destroy(addressOf(state.scratch))

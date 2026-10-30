@@ -1,0 +1,30 @@
+--!low
+import "windows/ffi"
+import "std/buffer"
+import "std/host"
+
+-- Direct Windows API calls: no C++ source, SDK import library or linker flag.
+extern "kernel32.dll" function ticks(): u64 = "GetTickCount64"
+extern "kernel32.dll" function Sleep(milliseconds: u32): void
+extern "kernel32.dll" function GetModuleFileNameW(module: ptr<void>, path: ptr<u16>, capacity: u32): u32
+extern "user32.dll" function messageBox(owner: ptr<void>, contents: ptr<u16>, title: ptr<u16>, flags: u32): i32 = "MessageBoxW"
+
+local started = ticks()
+Sleep(10)
+print("Windows uptime (ms):", ticks(), "elapsed:", ticks() - started)
+local path = zero<array<u16, 32768>>()
+local units = GetModuleFileNameW(zero<ptr<void>>(), addressOf(path[0]), 32768)
+assert(units > 0 and units < 32768)
+local text = zero<buffer.Buffer>()
+buffer.initialize(addressOf(text), host.allocator())
+assert(ffi.fromWide(addressOf(path[0]), 32768, addressOf(text)))
+print("Executable:", buffer.view(addressOf(text)))
+buffer.destroy(addressOf(text))
+if argumentCount() == 2 and argument(1) == "--message" then
+    local title = ffi.wide("LuASM")
+    local contents = ffi.wide("A direct Windows API call — 日本 😀")
+    assert(title.ok and contents.ok)
+    messageBox(nil, ffi.data(contents), ffi.data(title), 0)
+    ffi.destroy(addressOf(contents))
+    ffi.destroy(addressOf(title))
+end

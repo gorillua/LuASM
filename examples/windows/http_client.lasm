@@ -1,0 +1,19 @@
+--!low
+import "std/http"
+import "std/host"
+import "std/buffer"
+
+if argumentCount() < 2 then
+    print("Usage: luasm run http_client.lasm -- https://example.com/")
+else
+    local body = zero<buffer.Buffer>()
+    buffer.initialize(addressOf(body), host.allocator())
+    local response = http.get(argument(1), addressOf(body))
+    if response.ok then
+        print("HTTP status:", response.status, "bytes:", body.length)
+        print(buffer.view(addressOf(body)))
+    else
+        print("HTTP request failed; category:", response.kind, "Windows error:", response.error)
+    end
+    buffer.destroy(addressOf(body))
+end
