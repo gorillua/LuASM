@@ -1,0 +1,37 @@
+--!low
+import "boot/limine"
+import "hardware/serial"
+import "memory/arena"
+import "graphics/framebuffer"
+import "graphics/console"
+import "std/buffer"
+
+function kernelMain(): void
+    disableInterrupts()
+    serial.initialize()
+    local response = limine.framebuffers()
+    assert(address(response) ~= 0 and response.count > 0)
+    local display = response.framebuffers[0]
+    assert(display.bpp == 32 and display.redMaskShift == 16 and display.greenMaskShift == 8 and display.blueMaskShift == 0)
+    local surface = framebuffer.Framebuffer{address = cast<ptr<volatile<u32>>>(display.address), width = cast<u32>(display.width), height = cast<u32>(display.height), pitch = cast<usize>(display.pitch)}
+    local terminal = zero<console.Console>()
+    assert(console.initialize(addressOf(terminal), surface, 2, 0x38BDF8, 0x0F172A))
+    console.writeLine(addressOf(terminal), "LuASM | Freestanding libraries")
+    console.colors(addressOf(terminal), 0xE2E8F0, 0x0F172A)
+    console.writeLine(addressOf(terminal), "")
+    local bytes = zero<array<u8, 4096>>()
+    local scratch = zero<arena.Arena>()
+    assert(arena.initialize(addressOf(scratch), addressOf(bytes[0]), 4096))
+    local message = zero<buffer.Buffer>()
+    buffer.initialize(addressOf(message), arena.allocator(addressOf(scratch)))
+    assert(buffer.appendText(addressOf(message), "Text buffer backed by a temporary arena."))
+    console.writeLine(addressOf(terminal), buffer.view(addressOf(message)))
+    console.write(addressOf(terminal), "Arena bytes used: ")
+    console.writeUnsigned(addressOf(terminal), cast<u64>(scratch.used), 10)
+    console.writeLine(addressOf(terminal), " / 4096")
+    buffer.destroy(addressOf(message))
+    assert(arena.reset(addressOf(scratch)))
+    console.writeLine(addressOf(terminal), "Memory reset; no hosted allocator or Windows API required.")
+    serial.write("LuASM kernel: hello from x86-64!\r\n")
+    while true do halt() end
+end

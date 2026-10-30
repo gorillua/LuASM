@@ -1,0 +1,270 @@
+--!low
+#define PIT_HZ 100
+import "hardware/serial"
+import "boot/limine"
+import "graphics/framebuffer" as graphics
+import "memory/physical"
+import "memory/paging"
+import "hardware/interrupts"
+import "hardware/pic"
+import "hardware/timer"
+import "hardware/keyboard"
+import "memory/heap"
+import "filesystem/ramfs"
+
+global pageAllocator: physical.Allocator = zero<physical.Allocator>()
+global kernelSpace: paging.Space = zero<paging.Space>()
+global breakpoints: u64 = 0
+global kernelHeap: heap.Heap = zero<heap.Heap>()
+global files: ramfs.FileSystem = zero<ramfs.FileSystem>()
+
+struct FaultRecovery
+    armed: boolean
+    frame: u64
+    count: u64
+end
+global recovery: FaultRecovery = zero<FaultRecovery>()
+global const FAULT_ALIAS: u64 = 0xFFFFA00000000000
+
+interrupt function onPageFault(frame: ptr<interrupts.Frame>, error: u64): void
+    local shared = cast<ptr<volatile<FaultRecovery>>>(addressOf(recovery))
+    if shared.armed and readCR2() == FAULT_ALIAS and error == 0 then
+        if paging.map4k(addressOf(kernelSpace), FAULT_ALIAS, shared.frame, paging.WRITABLE) then
+            invalidatePage(cast<usize>(FAULT_ALIAS))
+            shared.armed = false
+            shared.count += 1
+            return
+        end
+    end
+    stop("LuASM boot failed: unrecoverable page fault\r\n")
+end
+
+interrupt function unexpected(frame: ptr<interrupts.Frame>): void
+    stop("LuASM boot failed: unexpected interrupt/exception\r\n")
+end
+
+interrupt function exception(frame: ptr<interrupts.Frame>, error: u64): void
+    serial.write("LuASM boot failed: exception; error: ")
+    serial.writeUnsigned(error)
+    serial.write("; IP: ")
+    serial.writeUnsigned(frame.ip)
+    serial.write("; CR2: ")
+    serial.writeUnsigned(readCR2())
+    stop("\r\n")
+end
+
+interrupt function onBreakpoint(frame: ptr<interrupts.Frame>): void
+    local count = cast<ptr<volatile<u64>>>(addressOf(breakpoints))
+    store(count, load(count) + 1)
+    @asm("xorq %r10, %r10; xorq %r11, %r11", "~{r10},~{r11}")
+end
+
+function stop(message: string): void
+    serial.write(message)
+    while true do halt() end
+end
+
+function testPhysicalMemory(map: ptr<limine.MemoryMapResponse>, offset: u64): void
+    local owner = addressOf(pageAllocator)
+    if not physical.initialize(owner, map, offset) then
+        stop("LuASM boot failed: physical allocator initialization\r\n")
+    end
+    local available = pageAllocator.freePages
+    local first = physical.allocateZeroed(owner)
+    local second = physical.allocateZeroed(owner)
+    if first == 0 or second == 0 or first == second then
+        stop("LuASM boot failed: physical page allocation\r\n")
+    end
+    local left = cast<ptr<volatile<u8>>>(physical.mapped(owner, first))
+    local right = cast<ptr<volatile<u8>>>(physical.mapped(owner, second))
+    for byte: usize = 0, 4095 do
+        if left[byte] ~= 0 or right[byte] ~= 0 then stop("LuASM boot failed: zeroed pages\r\n") end
+        left[byte] = cast<u8>(byte)
+        right[byte] = ~cast<u8>(byte)
+    end
+    for byte: usize = 0, 4095 do
+        if left[byte] ~= cast<u8>(byte) or right[byte] ~= ~cast<u8>(byte) then
+            stop("LuASM boot failed: page contents overlap\r\n")
+        end
+    end
+    if not physical.release(owner, first) then stop("LuASM boot failed: page release\r\n") end
+    if physical.release(owner, first) then stop("LuASM boot failed: double free accepted\r\n") end
+    local reused = physical.allocateZeroed(owner)
+    if reused ~= first then stop("LuASM boot failed: page reuse\r\n") end
+    for byte: usize = 0, 4095 do
+        if left[byte] ~= 0 or right[byte] ~= ~cast<u8>(byte) then
+            stop("LuASM boot failed: reused page contents\r\n")
+        end
+    end
+    if not physical.release(owner, reused) or not physical.release(owner, second) then
+        stop("LuASM boot failed: final page release\r\n")
+    end
+    if pageAllocator.freePages ~= available then stop("LuASM boot failed: page accounting\r\n") end
+    serial.write("Physical pages: ready; free pages: ")
+    serial.writeUnsigned(pageAllocator.freePages)
+    serial.write("; metadata pages: ")
+    serial.writeUnsigned(pageAllocator.metadataPages)
+    serial.write("; first: ")
+    serial.writeUnsigned(first)
+    serial.write("; second: ")
+    serial.writeUnsigned(second)
+    serial.write("; reuse and contents verified\r\n")
+end
+
+-- Build with --boot-protocol limine and kernel.ld. Never return to the loader.
+function testPaging(): void
+    if (readCR4() & 0x21000) ~= 0 then stop("LuASM boot failed: LA57/PCID unsupported\r\n") end
+    local previous = readCR3() & 0x000FFFFFFFFFF000
+    local owner = addressOf(pageAllocator)
+    local space = addressOf(kernelSpace)
+    local available = pageAllocator.freePages
+    if not paging.clone(space, owner, previous) then stop("LuASM boot failed: page table clone\r\n") end
+    local first = physical.allocateZeroed(owner)
+    local second = physical.allocateZeroed(owner)
+    local alias: u64 = 0xFFFF900000000000
+    if first == 0 or second == 0 or not paging.map4k(space, alias, first, paging.WRITABLE) then
+        stop("LuASM boot failed: virtual mapping\r\n")
+    end
+    writeCR3(kernelSpace.root)
+    if (readCR3() & 0x000FFFFFFFFFF000) ~= kernelSpace.root then stop("LuASM boot failed: CR3 switch\r\n") end
+    local virtual = ptr<volatile<u64>>(cast<usize>(alias))
+    local direct = cast<ptr<volatile<u64>>>(physical.mapped(owner, first))
+    store(virtual, 0x12345678)
+    if load(direct) ~= 0x12345678 then stop("LuASM boot failed: alias write\r\n") end
+    local translated = paging.translate(space, alias + 4095)
+    if not translated.present or translated.physical ~= first + 4095 then stop("LuASM boot failed: page walk\r\n") end
+    if paging.unmap4k(space, alias) ~= first then stop("LuASM boot failed: unmap\r\n") end
+    invalidatePage(cast<usize>(alias))
+    if paging.translate(space, alias).present then stop("LuASM boot failed: stale page walk\r\n") end
+    if not paging.map4k(space, alias, second, paging.WRITABLE) then stop("LuASM boot failed: remap\r\n") end
+    invalidatePage(cast<usize>(alias))
+    store(virtual, 0x87654321)
+    if load(direct) ~= 0x12345678 or load(cast<ptr<volatile<u64>>>(physical.mapped(owner, second))) ~= 0x87654321 then
+        stop("LuASM boot failed: stale TLB\r\n")
+    end
+    if paging.unmap4k(space, alias) ~= second then stop("LuASM boot failed: final unmap\r\n") end
+    invalidatePage(cast<usize>(alias))
+    if not physical.release(owner, first) or not physical.release(owner, second) then stop("LuASM boot failed: mapping payload release\r\n") end
+    if pageAllocator.freePages + cast<u64>(kernelSpace.count) ~= available then stop("LuASM boot failed: table accounting\r\n") end
+    serial.write("Paging: ready; old CR3: ")
+    serial.writeUnsigned(previous)
+    serial.write("; new CR3: ")
+    serial.writeUnsigned(kernelSpace.root)
+    serial.write("; owned tables: ")
+    serial.writeUnsigned(cast<u64>(kernelSpace.count))
+    serial.write("; alias and TLB verified\r\n")
+end
+
+function testInterrupts(): void
+    if not interrupts.initialize(functionAddress(unexpected), functionAddress(exception)) then stop("LuASM boot failed: descriptor tables\r\n") end
+    if readCS() ~= 8 then stop("LuASM boot failed: code selector\r\n") end
+    if not interrupts.setGate(3, functionAddress(onBreakpoint), 0) then stop("LuASM boot failed: breakpoint gate\r\n") end
+    breakpoint()
+    local saved = @asm<u64>("movq $$0x12345678, %r10; int3; movq %r10, $0", "=r,~{r10}")
+    if saved ~= 0x12345678 or load(cast<ptr<volatile<u64>>>(addressOf(breakpoints))) ~= 2 then stop("LuASM boot failed: interrupt register preservation\r\n") end
+    if not interrupts.setGate(14, functionAddress(onPageFault), 0) then stop("LuASM boot failed: page fault gate\r\n") end
+    local shared = cast<ptr<volatile<FaultRecovery>>>(addressOf(recovery))
+    shared.frame = physical.allocateZeroed(addressOf(pageAllocator))
+    if shared.frame == 0 then stop("LuASM boot failed: fault test frame\r\n") end
+    shared.armed = true
+    local value = @asm<u64>("movq ($1), $0", "=r,r", FAULT_ALIAS)
+    if value ~= 0 or shared.armed or shared.count ~= 1 then stop("LuASM boot failed: fault retry\r\n") end
+    if paging.unmap4k(addressOf(kernelSpace), FAULT_ALIAS) ~= shared.frame then stop("LuASM boot failed: fault mapping release\r\n") end
+    invalidatePage(cast<usize>(FAULT_ALIAS))
+    if not physical.release(addressOf(pageAllocator), shared.frame) then stop("LuASM boot failed: fault frame release\r\n") end
+    if not pic.initialize() then stop("LuASM boot failed: unsupported PIC/APIC mode\r\n") end
+    if not interrupts.setGate(32, functionAddress(timer.onTick), 0) or not timer.start(#PIT_HZ) then stop("LuASM boot failed: timer start\r\n") end
+    while timer.ticks() < 3 do
+        enableInterrupts()
+        halt()
+        disableInterrupts()
+    end
+    timer.stop()
+    serial.write("Interrupts: ready; GDT/TSS/IDT, INT3 registers, page fault retry and PIT ticks verified\r\n")
+    if not interrupts.setGate(33, functionAddress(keyboard.onKey), 0) or not keyboard.initialize() then stop("LuASM boot failed: keyboard initialization\r\n") end
+    serial.write("Keyboard: ready; i8042, translated set 1 and IRQ handler installed\r\n")
+end
+
+function testLibraries(): void
+    local available = pageAllocator.freePages
+    if not heap.initialize(addressOf(kernelHeap), addressOf(pageAllocator)) then stop("LuASM boot failed: heap initialize\r\n") end
+    local small = heap.allocate(addressOf(kernelHeap), 32)
+    local large = heap.allocateZeroed(addressOf(kernelHeap), 9000)
+    if address(small) == 0 or address(large) == 0 then stop("LuASM boot failed: heap allocation\r\n") end
+    local bytes = cast<ptr<volatile<u8>>>(large)
+    small[0] = 42
+    for byte: usize = 0, 8999 do
+        if bytes[byte] ~= 0 then stop("LuASM boot failed: heap zeroing\r\n") end
+        bytes[byte] = cast<u8>(byte)
+    end
+    for byte: usize = 0, 8999 do
+        if bytes[byte] ~= cast<u8>(byte) then stop("LuASM boot failed: heap contents\r\n") end
+    end
+    if small[0] ~= 42 or not heap.release(addressOf(kernelHeap), small) or not heap.release(addressOf(kernelHeap), large) then stop("LuASM boot failed: heap release\r\n") end
+    if pageAllocator.freePages ~= available or kernelHeap.pages ~= 0 then stop("LuASM boot failed: heap page leak\r\n") end
+    serial.write("Heap: ready; small and multi-page allocations verified\r\n")
+    local fs = addressOf(files)
+    if not ramfs.initialize(fs, addressOf(kernelHeap)) then stop("LuASM boot failed: RAMFS initialize\r\n") end
+    local directory = ramfs.create(fs, "/boot", true)
+    local file = ramfs.create(fs, "/boot/status", false)
+    local text: string = "LuASM RAMFS"
+    if directory == 0 or file == 0 or not ramfs.write(fs, file, 0, stringData(text), stringLength(text)) then stop("LuASM boot failed: RAMFS write\r\n") end
+    local buffer = zero<array<u8, 32>>()
+    local read = ramfs.read(fs, file, 0, addressOf(buffer[0]), 32)
+    if read ~= stringLength(text) or memcmp(addressOf(buffer[0]), stringData(text), read) ~= 0 then stop("LuASM boot failed: RAMFS contents\r\n") end
+    if not ramfs.rename(fs, "/boot/status", "/boot/log") or ramfs.open(fs, "/boot/log") ~= file then stop("LuASM boot failed: RAMFS rename\r\n") end
+    if not ramfs.remove(fs, "/boot/log") or not ramfs.remove(fs, "/boot") then stop("LuASM boot failed: RAMFS remove\r\n") end
+    ramfs.destroy(fs)
+    if pageAllocator.freePages ~= available or kernelHeap.allocations ~= 0 then stop("LuASM boot failed: RAMFS leak\r\n") end
+    serial.write("RAMFS: ready; directories, write/read/rename/remove verified\r\n")
+end
+
+function kernelMain(): void
+    disableInterrupts()
+    serial.initialize()
+    local map = limine.memoryMap()
+    local direct = limine.directMap()
+    if address(map) == 0 or address(direct) == 0 then
+        stop("LuASM boot failed: memory map/direct map missing\r\n")
+    end
+    local usable: u64 = 0
+    local index: usize = 0
+    while index < cast<usize>(map.count) do
+        local region = map.entries[index]
+        if region.kind == 0 then usable += region.length end
+        index += 1
+    end
+    if usable == 0 or direct.offset == 0 then
+        stop("LuASM boot failed: no usable memory/direct mapping\r\n")
+    end
+    serial.write("Memory map: ready; usable bytes: ")
+    serial.writeUnsigned(usable)
+    serial.write("\r\n")
+    testPhysicalMemory(map, direct.offset)
+    testPaging()
+    testInterrupts()
+    testLibraries()
+
+    local response = limine.framebuffers()
+    if address(response) == 0 or response.count == 0 then
+        stop("LuASM boot failed: framebuffer missing\r\n")
+    end
+    local raw = response.framebuffers[0]
+    if raw.bpp ~= 32 or raw.memoryModel ~= 1 or raw.redMaskSize ~= 8 or raw.greenMaskSize ~= 8 or raw.blueMaskSize ~= 8 then
+        stop("LuASM boot failed: unsupported framebuffer format\r\n")
+    end
+    if raw.width > 4294967295 or raw.height > 4294967295 then
+        stop("LuASM boot failed: framebuffer dimensions exceed u32\r\n")
+    end
+    local display = graphics.Framebuffer{
+        address = cast<ptr<volatile<u32>>>(raw.address), width = cast<u32>(raw.width),
+        height = cast<u32>(raw.height), pitch = cast<usize>(raw.pitch)
+    }
+    local color: u32 = (cast<u32>(0x33) << raw.redMaskShift) | (cast<u32>(0x99) << raw.greenMaskShift) | (cast<u32>(0xCC) << raw.blueMaskShift)
+    graphics.fillRect(addressOf(display), 0, 0, 64, 32, color)
+    serial.write("Framebuffer: ready\r\n")
+    serial.write("LuASM kernel: hello from x86-64!\r\n")
+    while true do
+        halt()
+    end
+end
