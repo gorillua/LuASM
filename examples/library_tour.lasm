@@ -1,0 +1,20 @@
+--!low
+import "std/math"
+import "std/random"
+import "std/host"
+import "std/buffer"
+import "std/strings"
+import "std/base64"
+
+print("Square root:", math.sqrt(81.0))
+local generator = random.create(12345)
+print("Random number from 0 to 9:", random.below(addressOf(generator), 10))
+local result = zero<buffer.Buffer>()
+buffer.initialize(addressOf(result), host.allocator())
+assert(strings.append(addressOf(result), "Score: "))
+assert(strings.appendUnsigned(addressOf(result), 42))
+print(buffer.view(addressOf(result)))
+buffer.clear(addressOf(result))
+assert(base64.encode("hello", addressOf(result)))
+print("Base64:", buffer.view(addressOf(result)))
+buffer.destroy(addressOf(result))

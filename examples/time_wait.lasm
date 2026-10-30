@@ -1,0 +1,6 @@
+local start = time()
+print("Started:", start)
+
+local elapsed = wait(0.5)
+print("Waited:", elapsed, "seconds")
+print("Program time:", time(), "seconds")

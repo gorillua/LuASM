@@ -1,0 +1,25 @@
+--!low
+import "../libraries/std/host"
+import "../libraries/std/buffer"
+import "../libraries/std/text"
+import "../libraries/std/vector"
+
+-- luasm run examples/native_app.lasm -- output.txt
+if argumentCount() < 2 then
+    print("Usage: native_app output.txt")
+else
+    local contents = zero<buffer.Buffer>()
+    buffer.initialize(addressOf(contents), host.allocator())
+    assert(buffer.appendText(addressOf(contents), "Hello from LuASM!\n"))
+    assert(host.writeFile(argument(1), buffer.view(addressOf(contents))))
+    buffer.clear(addressOf(contents))
+    assert(host.readFile(argument(1), addressOf(contents)))
+    print(text.trim(buffer.view(addressOf(contents))))
+    local numbers = zero<vector.IntVector>()
+    vector.initialize(addressOf(numbers), host.allocator())
+    assert(vector.push(addressOf(numbers), 21))
+    assert(vector.push(addressOf(numbers), 42))
+    print("Stored values:", vector.length(addressOf(numbers)), vector.pop(addressOf(numbers)))
+    vector.destroy(addressOf(numbers))
+    buffer.destroy(addressOf(contents))
+end

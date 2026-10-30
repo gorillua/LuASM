@@ -1,0 +1,11 @@
+--!low
+struct Point
+    x: i32
+    y: i32
+end
+
+local point = Point{x = 10, y = 20}
+local samples: array<i32, 3> = {3, 5, 8}
+point.x += samples[1]
+store(addressOf(point.y), 30)
+print(point.x, point.y, sizeof<Point>(), offsetof<Point>("y"))
