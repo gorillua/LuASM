@@ -1,14 +1,1 @@
---!low
-import "std/buffer"
-import "std/base64"
-import "std/host"
-
-local text = "Hello World!"
-local buff = zero<buffer.Buffer>()
-buffer.initialize(addressOf(buff), host.allocator())
-
-assert(base64.encode(text, addressOf(buff)))
-
-print(buffer.view(addressOf(buff)))
-
-buffer.destroy(addressOf(buff))
+print("Hello, World!")
